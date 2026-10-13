@@ -27,8 +27,57 @@ Arno Hart · [LinkedIn](https://www.linkedin.com/in/arnohart/)
 
 ## What happened on a real recording
 
-Not run yet. This section will say exactly what happened once it has been run on a
-real recording.
+On 13 October 2026 I ran it on a real meeting recording, 4 minutes 29 seconds long,
+8 kHz mono. Neither the recording nor anything produced from it is in this
+repository.
+
+**As built, it worked first time.** Using `diarize=true` and `nova-2`, Deepgram
+found 2 speakers in 26 stretches of speech. The method returned 26 turns,
+alternating agent and customer, 13 each. Every turn came back punctuated:
+Deepgram put `punctuated_word` on every word, even though only `punctuate=true`
+is asked for. The whole run took 13.3 seconds:
+
+| Step | Seconds |
+|---|---|
+| Downmix to 8 kHz mono | 0.7 |
+| Find the speakers (Deepgram) | 4.3 |
+| Build the two sided file | under 0.1 |
+| Split the two sides | 0.2 |
+| Transcribe the agent side (Deepgram) | 4.3 |
+| Transcribe the customer side (Deepgram) | 3.8 |
+
+**Then with the option Deepgram documents today.** Straight after that, I ran the
+same recording through the same code again, but with the speaker pass sending
+`diarize_model=latest` in place of the deprecated `diarize=true`. Nothing else
+changed.
+
+| | `diarize=true`, as built | `diarize_model=latest` |
+|---|---|---|
+| Speakers found | 2 | 3; the third speaks for 0.6 seconds in all |
+| Stretches of speech | 26 | 39 |
+| First speaker | 0.4 to 4.9 seconds | the same stretch |
+| Seconds on the agent side / customer side | 140.2 / 111.2 | 144.1 / 102.3 |
+| Turns | 26 (13 agent, 13 customer) | 25 (13 agent, 12 customer) |
+| Words on the agent side / customer side | 383 / 332 | 401 / 310 |
+| Punctuation | on every turn | on every turn |
+| Finding the speakers | 4.3 seconds | 5.2 seconds |
+| Whole run | 13.3 seconds | 13.8 seconds |
+
+The two runs put speech on the same side 96% of the time (237 of the 246 seconds
+both of them assigned). The differences are in three places:
+
+* About 20 seconds in, a short agent turn in the first run becomes part of the
+  customer's turn in the second.
+* At about 214 seconds, the second run finds a short agent turn inside what the
+  first run kept as one customer turn.
+* The first run ends with a short customer turn at about 264 seconds. The
+  second run ends on the agent.
+
+The third speaker in the second run lands on the customer side, as everyone
+after the first speaker does. Nobody has yet listened through the recording to
+judge which run is closer to who really spoke.
+
+Nothing failed in either run.
 
 ## Quickstart
 
@@ -98,12 +147,13 @@ documentation.
   request body with `Content-Type: audio/wav`, match the documentation.
 * The speaker pass uses `diarize=true`. Deepgram now marks that parameter as
   deprecated in favour of `diarize_model`. It still works and uses their first
-  diarization model. I have left it as built.
+  diarization model. I have left it as built. See the comparison above.
 * `nova-2` is still listed and not marked as deprecated. Deepgram has newer models.
 * No `language` is sent, so Deepgram uses its default, English.
 * Deepgram's documentation ties the `punctuated_word` field to smart formatting,
   while this method asks for `punctuate`. The code uses `punctuated_word` when it
-  is there and the plain word when it is not.
+  is there and the plain word when it is not. In the real run it was on every
+  word.
 * Deepgram returns an error for a request that takes longer than ten minutes to
   process. The speaker pass sends the whole recording in one request.
 
