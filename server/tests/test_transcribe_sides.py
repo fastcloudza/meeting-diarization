@@ -10,16 +10,14 @@ import numpy as np
 
 import transcribe_sides
 from errors import MeetingDiarizationError
-from fakes import FakeResponse, deepgram_body, word, write_wav
+from fakes import FakeResponse, deepgram_body, mistral_body, patch_keys, segment, word, write_wav
 
 
 class Base(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
-        patcher = mock.patch.object(transcribe_sides, "DEEPGRAM_API_KEY", "test-key-not-real")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        patch_keys(self, mistral="mistral-test-key-not-real", deepgram="test-key-not-real")
         self.side = os.path.join(self.dir, "side.wav")
         write_wav(self.side, np.zeros(16000, dtype=np.int16), rate=16000)
 
@@ -140,7 +138,7 @@ class ChunkingTests(Base):
         with mock.patch.object(transcribe_sides, "get_audio_duration", return_value=1000.0), \
                 mock.patch.object(transcribe_sides, "split_audio_into_chunks", return_value=chunks), \
                 mock.patch.object(transcribe_sides, "transcribe_channel_direct", side_effect=replies):
-            segs = transcribe_sides.transcribe_channel_chunked(self.side, "agent", "en")
+            segs = transcribe_sides.transcribe_channel_chunked(self.side, "agent", "en", "mistral")
         self.assertEqual([(s["text"], s["start"]) for s in segs], [("first", 1.0), ("second", 545.0)])
 
         with mock.patch.object(transcribe_sides, "get_audio_duration", return_value=1000.0), \
@@ -148,36 +146,115 @@ class ChunkingTests(Base):
                 mock.patch.object(transcribe_sides, "transcribe_channel_direct",
                                   side_effect=[replies[0], MeetingDiarizationError("chunk failed")]):
             with self.assertRaisesRegex(MeetingDiarizationError, "chunk failed"):
-                transcribe_sides.transcribe_channel_chunked(self.side, "agent", "en")
+                transcribe_sides.transcribe_channel_chunked(self.side, "agent", "en", "mistral")
+
+
+class MistralSegmentsTests(Base):
+    def test_request_and_parse(self):
+        body = mistral_body([segment(" Thanks everyone. ", 0.2, 1.0), segment("Next item.", 2.5, 3.1)])
+        with mock.patch("requests.post", return_value=FakeResponse(200, body)) as post:
+            segs = transcribe_sides.transcribe_channel_direct(self.side, "agent", "en", "mistral")
+        self.assertEqual(segs, [
+            {"speaker": "agent", "text": "Thanks everyone.", "start": 0.2, "end": 1.0, "language": "en"},
+            {"speaker": "agent", "text": "Next item.", "start": 2.5, "end": 3.1, "language": "en"},
+        ])
+        self.assertEqual(post.call_args.args[0], "https://api.mistral.ai/v1/audio/transcriptions")
+        kwargs = post.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer mistral-test-key-not-real")
+        self.assertEqual(kwargs["data"], {"model": "voxtral-mini-latest", "timestamp_granularities": ["segment"]})
+        self.assertNotIn("diarize", kwargs["data"])
+
+    def test_silent_side_returns_nothing(self):
+        with mock.patch("requests.post", return_value=FakeResponse(200, mistral_body([], text=""))):
+            self.assertEqual(transcribe_sides.transcribe_channel_direct(self.side, "agent", "en", "mistral"), [])
+
+    def test_text_without_segments_stops(self):
+        with mock.patch("requests.post", return_value=FakeResponse(200, mistral_body([], text="Some words"))):
+            with self.assertRaisesRegex(MeetingDiarizationError, "without segment timings"):
+                transcribe_sides.transcribe_channel_direct(self.side, "agent", "en", "mistral")
+
+    def test_missing_key_stops(self):
+        patch_keys(self, mistral="", deepgram="test-key-not-real")
+        with self.assertRaisesRegex(MeetingDiarizationError, "MISTRAL_API_KEY"):
+            transcribe_sides.transcribe_channel_direct(self.side, "agent", "en", "mistral")
+
+
+def stereo_fakes(case):
+    """A made up two sided file, a fake ffmpeg and a fixed duration."""
+    stereo = os.path.join(case.dir, "meeting.synthetic.wav")
+    write_wav(stereo, np.zeros(16000, dtype=np.int16), rate=8000, channels=2)
+
+    def fake_ffmpeg(cmd, **kwargs):
+        write_wav(cmd[-1], np.zeros(16000, dtype=np.int16), rate=16000)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    run = mock.patch("subprocess.run", side_effect=fake_ffmpeg)
+    duration = mock.patch.object(transcribe_sides, "get_audio_duration", return_value=4.0)
+    return stereo, run, duration
+
+
+MISTRAL_LEFT = mistral_body([segment("Welcome", 0.2, 0.6), segment("Shall we?", 3.0, 3.4)])
+MISTRAL_RIGHT = mistral_body([segment("Thanks.", 1.0, 1.4)])
+DEEPGRAM_LEFT = deepgram_body([word("Welcome", 0.2, 0.6), word("Shall", 3.0, 3.2), word("we?", 3.2, 3.4)])
+DEEPGRAM_RIGHT = deepgram_body([word("Thanks.", 1.0, 1.4)])
+EXPECTED_TURNS = [("agent", "Welcome"), ("customer", "Thanks."), ("agent", "Shall we?")]
 
 
 class TranscribeStereoTests(Base):
-    def test_left_is_agent_right_is_customer(self):
-        stereo = os.path.join(self.dir, "meeting.synthetic.wav")
-        write_wav(stereo, np.zeros(16000, dtype=np.int16), rate=8000, channels=2)
-
-        def fake_ffmpeg(cmd, **kwargs):
-            write_wav(cmd[-1], np.zeros(16000, dtype=np.int16), rate=16000)
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-
-        left = deepgram_body([word("Welcome", 0.2, 0.6), word("Shall", 3.0, 3.2), word("we?", 3.2, 3.4)])
-        right = deepgram_body([word("Thanks.", 1.0, 1.4)])
-        with mock.patch("subprocess.run", side_effect=fake_ffmpeg) as run, \
-                mock.patch.object(transcribe_sides, "get_audio_duration", return_value=4.0), \
-                mock.patch("requests.post", side_effect=[FakeResponse(200, left), FakeResponse(200, right)]):
+    def test_mistral_by_default_left_is_agent_right_is_customer(self):
+        stereo, run_patch, duration_patch = stereo_fakes(self)
+        replies = [FakeResponse(200, MISTRAL_LEFT), FakeResponse(200, MISTRAL_RIGHT)]
+        with run_patch as run, duration_patch, mock.patch("requests.post", side_effect=replies) as post:
             result = transcribe_sides.transcribe_stereo(stereo)
 
+        self.assertTrue(all("mistral" in c.args[0] for c in post.call_args_list))
         pans = [c.args[0][c.args[0].index("-af") + 1] for c in run.call_args_list]
         self.assertEqual(pans, ["pan=mono|c0=c0", "pan=mono|c0=c1"])
-        self.assertEqual([(t["speaker"], t["text"]) for t in result["conversation"]], [
-            ("agent", "Welcome"),
-            ("customer", "Thanks."),
-            ("agent", "Shall we?"),
-        ])
+        self.assertEqual([(t["speaker"], t["text"]) for t in result["conversation"]], EXPECTED_TURNS)
+        self.assertEqual(result["backend"], "mistral")
+        self.assertEqual(result["model"], "voxtral-mini-latest")
+        self.assertEqual(result["failures"], {})
         self.assertEqual(result["total_turns"], 3)
         self.assertFalse(result["chunking_used"])
         self.assertFalse(os.path.exists(stereo + ".left.wav"))
         self.assertFalse(os.path.exists(stereo + ".right.wav"))
+
+    def test_failure_on_one_side_moves_both_sides_to_deepgram(self):
+        stereo, run_patch, duration_patch = stereo_fakes(self)
+        replies = [
+            FakeResponse(200, MISTRAL_LEFT),               # mistral, agent side: fine
+            FakeResponse(503, None, text="unavailable"),  # mistral, customer side: fails
+            FakeResponse(200, DEEPGRAM_LEFT),             # deepgram redoes the agent side
+            FakeResponse(200, DEEPGRAM_RIGHT),            # and the customer side
+        ]
+        with run_patch, duration_patch, mock.patch("requests.post", side_effect=replies) as post:
+            result = transcribe_sides.transcribe_stereo(stereo)
+
+        vendors = ["mistral" if "mistral" in c.args[0] else "deepgram" for c in post.call_args_list]
+        self.assertEqual(vendors, ["mistral", "mistral", "deepgram", "deepgram"])
+        self.assertEqual(result["backend"], "deepgram")
+        self.assertEqual(result["model"], "nova-2")
+        self.assertIn("HTTP 503", result["failures"]["mistral"])
+        self.assertEqual([(t["speaker"], t["text"]) for t in result["conversation"]], EXPECTED_TURNS)
+
+    def test_deepgram_only_reader(self):
+        patch_keys(self, mistral="", deepgram="test-key-not-real")
+        stereo, run_patch, duration_patch = stereo_fakes(self)
+        replies = [FakeResponse(200, DEEPGRAM_LEFT), FakeResponse(200, DEEPGRAM_RIGHT)]
+        with run_patch, duration_patch, mock.patch("requests.post", side_effect=replies) as post:
+            result = transcribe_sides.transcribe_stereo(stereo)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(result["backend"], "deepgram")
+        self.assertIn("not configured", result["failures"]["mistral"])
+
+    def test_both_fail_stops(self):
+        stereo, run_patch, duration_patch = stereo_fakes(self)
+        replies = [FakeResponse(401, None, text="Unauthorized"), FakeResponse(402, None, text="no credit")]
+        with run_patch, duration_patch, mock.patch("requests.post", side_effect=replies):
+            with self.assertRaisesRegex(MeetingDiarizationError,
+                                        "every backend: mistral: .*HTTP 401.*deepgram: .*HTTP 402"):
+                transcribe_sides.transcribe_stereo(stereo)
+        self.assertFalse(os.path.exists(stereo + ".left.wav"))
 
     def test_channel_extraction_failure_stops(self):
         with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "bad")):

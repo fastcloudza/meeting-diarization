@@ -1,8 +1,45 @@
-"""Made up test data in the shape Deepgram returns. Nothing here is a real recording."""
+"""Made up test data in the shapes Mistral and Deepgram return. Nothing here is a real recording."""
 import json
 import wave
+from unittest import mock
 
 import numpy as np
+
+import prepare_meeting
+import transcribe_sides
+
+
+def patch_keys(case, mistral="", deepgram=""):
+    """Fix both keys in both modules for one test, whatever the environment holds.
+
+    An empty string means that backend is not configured. Tests never see a real key.
+    """
+    for mod in (prepare_meeting, transcribe_sides):
+        for name, value in (("MISTRAL_API_KEY", mistral), ("DEEPGRAM_API_KEY", deepgram)):
+            patcher = mock.patch.object(mod, name, value)
+            patcher.start()
+            case.addCleanup(patcher.stop)
+
+
+def segment(text, start, end, speaker_id=None):
+    """One entry of a Mistral transcription response's segments."""
+    s = {"text": text, "start": start, "end": end, "type": "transcription_segment"}
+    if speaker_id is not None:
+        s["speaker_id"] = speaker_id
+    return s
+
+
+def mistral_body(segments, text=None):
+    """A /v1/audio/transcriptions response body around the given segments."""
+    if text is None:
+        text = " ".join(s.get("text", "") for s in segments)
+    return {
+        "model": "voxtral-mini-latest",
+        "text": text,
+        "language": None,
+        "segments": segments,
+        "usage": {"prompt_audio_seconds": 10, "prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0},
+    }
 
 
 class FakeResponse:

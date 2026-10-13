@@ -2,9 +2,13 @@
 Per side transcription of a two sided recording.
 
 Left channel = agent, right channel = customer. Each channel is split out with
-ffmpeg, transcribed on its own with Deepgram, and the two sides are merged back
-into one conversation ordered by time. Long audio is cut into overlapping
-chunks and the overlap is removed again on reassembly.
+ffmpeg, transcribed on its own, and the two sides are merged back into one
+conversation ordered by time. Long audio is cut into overlapping chunks and the
+overlap is removed again on reassembly.
+
+Mistral is the default backend and Deepgram the backup. Failover is at the
+request level: a failure on either side moves the whole request to the next
+backend, so both sides always come from the same backend.
 """
 import os
 import json
@@ -15,10 +19,17 @@ import requests
 
 from errors import MeetingDiarizationError
 
-# Deepgram settings come from the environment. The key is never written in a file.
+# Settings come from the environment. Keys are never written in a file.
+MISTRAL_API_URL = os.environ.get("MISTRAL_API_URL", "https://api.mistral.ai/v1/audio/transcriptions")
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "voxtral-mini-latest")
+
 DEEPGRAM_API_URL = os.environ.get("DEEPGRAM_API_URL", "https://api.deepgram.com/v1/listen")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 DEEPGRAM_MODEL = os.environ.get("DEEPGRAM_MODEL", "nova-2")
+
+# Failover chain, walked forward on any failure.
+FALLBACK_CHAIN = ["mistral", "deepgram"]
 
 # Chunking configuration
 CHUNK_DURATION = 540       # 9 minutes in seconds
@@ -133,6 +144,103 @@ def deduplicate_segments(segments, overlap=CHUNK_OVERLAP):
     return deduplicated
 
 
+def run_with_failover(attempt_fn, label="TRANSCRIBE"):
+    """Try each backend in the failover chain until one succeeds.
+
+    `attempt_fn(backend)` performs the transcription for a single backend and
+    returns its result or raises on failure. Returns
+    (result, used_backend, failures), where failures maps each backend that
+    failed before it to the reason. Raises MeetingDiarizationError if every
+    backend in the chain fails.
+
+    KeyboardInterrupt, SystemExit and MemoryError are never swallowed.
+    """
+    failures = {}
+
+    for i, backend in enumerate(FALLBACK_CHAIN):
+        try:
+            result = attempt_fn(backend)
+            return result, backend, failures
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:  # noqa: BLE001 (intentional catch all for failover)
+            failures[backend] = str(exc) or type(exc).__name__
+            logging.warning(f"[{label}] backend '{backend}' failed: {failures[backend]}")
+            if i + 1 < len(FALLBACK_CHAIN):
+                logging.info(f"[FAILOVER] {backend} failed, trying {FALLBACK_CHAIN[i + 1]}")
+
+    summary = "; ".join(f"{b}: {r}" for b, r in failures.items())
+    raise MeetingDiarizationError(f"Transcription failed on every backend: {summary}")
+
+
+def model_name_for(backend):
+    """Model name for a backend (used in the result)."""
+    return {
+        "mistral": MISTRAL_MODEL,
+        "deepgram": DEEPGRAM_MODEL,
+    }.get(backend, backend)
+
+
+def transcribe_mistral_vtt(audio_path, language=None):
+    """Transcribe using Mistral Voxtral API with timestamp output."""
+    if not MISTRAL_API_KEY:
+        raise MeetingDiarizationError(
+            "Mistral is not configured: set MISTRAL_API_KEY in the environment"
+        )
+
+    logging.info("[MISTRAL] Transcribing with Voxtral API (timestamps)")
+
+    with open(audio_path, 'rb') as audio_file:
+        headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
+        files = {"file": audio_file}
+        data = {"model": MISTRAL_MODEL, "timestamp_granularities": ["segment"]}
+
+        try:
+            response = requests.post(
+                MISTRAL_API_URL,
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=300
+            )
+        except requests.exceptions.RequestException as e:
+            raise MeetingDiarizationError(f"Mistral transcription request failed: {e}") from e
+
+    if response.status_code != 200:
+        raise MeetingDiarizationError(
+            f"Mistral transcription returned HTTP {response.status_code}: {response.text[:500]}"
+        )
+
+    try:
+        return response.json()
+    except ValueError as e:
+        raise MeetingDiarizationError(f"Mistral transcription response was not JSON: {e!r}") from e
+
+
+def parse_mistral_segments(result, speaker, language):
+    """Parse Mistral API response with segments into our format."""
+    segments = []
+
+    # Mistral returns segments in the response
+    if result.get('segments'):
+        for seg in result['segments']:
+            segments.append({
+                "speaker": speaker,
+                "text": seg.get('text', '').strip(),
+                "start": seg.get('start', 0.0),
+                "end": seg.get('end', 0.0),
+                "language": language
+            })
+    elif result.get('text', '').strip():
+        # Text without segment times cannot be placed in order.
+        raise MeetingDiarizationError(
+            f"Mistral returned text for the {speaker} side without segment timings, "
+            "so it cannot be placed in order"
+        )
+
+    return segments
+
+
 def _deepgram_alternative(audio_path, extra_params=None):
     """POST audio to Deepgram and return the first channel's first alternative.
 
@@ -227,17 +335,17 @@ def transcribe_deepgram_segments(audio_path, speaker, language, gap_threshold=0.
     return segments
 
 
-def transcribe_channel_chunked(audio_path, speaker, language):
+def transcribe_channel_chunked(audio_path, speaker, language, backend):
     """
     Transcribe a channel, chunking if necessary.
     Returns list of segments with speaker, text, start, end, language.
     """
     duration = get_audio_duration(audio_path)
-    logging.info(f"[CHUNK] Channel duration: {duration:.1f}s")
+    logging.info(f"[CHUNK] Channel duration: {duration:.1f}s, backend: {backend}")
 
     if duration <= MAX_DIRECT_DURATION:
         logging.info(f"[CHUNK] Duration under {MAX_DIRECT_DURATION}s, using direct transcription")
-        return transcribe_channel_direct(audio_path, speaker, language)
+        return transcribe_channel_direct(audio_path, speaker, language, backend)
 
     # Need to chunk
     logging.info(f"[CHUNK] Duration {duration:.1f}s exceeds limit, chunking into {CHUNK_DURATION}s segments")
@@ -248,7 +356,7 @@ def transcribe_channel_chunked(audio_path, speaker, language):
     try:
         for chunk_path, chunk_start_time in chunks:
             # Transcribe chunk. A failed chunk stops the run rather than leaving a gap.
-            chunk_segments = transcribe_channel_direct(chunk_path, speaker, language)
+            chunk_segments = transcribe_channel_direct(chunk_path, speaker, language, backend)
 
             if chunk_segments:
                 # Adjust timestamps
@@ -274,10 +382,19 @@ def transcribe_channel_chunked(audio_path, speaker, language):
     return deduplicated
 
 
-def transcribe_channel_direct(audio_path, speaker, language):
+def transcribe_channel_direct(audio_path, speaker, language, backend):
     """Transcribe a single channel directly (no chunking)."""
-    logging.info(f"[STEREO] Transcribing {speaker} channel, lang={language}")
-    return transcribe_deepgram_segments(audio_path, speaker, language)
+    logging.info(f"[STEREO] Transcribing {speaker} channel, lang={language}, backend={backend}")
+
+    if backend == "mistral":
+        result = transcribe_mistral_vtt(audio_path, language)
+        return parse_mistral_segments(result, speaker, language)
+
+    elif backend == "deepgram":
+        return transcribe_deepgram_segments(audio_path, speaker, language)
+
+    else:
+        raise MeetingDiarizationError(f"Unknown backend: {backend}")
 
 
 def consolidate_segments(segments):
@@ -357,13 +474,23 @@ def transcribe_stereo(input_path):
         # Get total duration
         total_duration = get_audio_duration(input_path)
 
-        # No language is sent to Deepgram, so both sides are transcribed with
-        # Deepgram's default language. The label records that.
+        # No language is sent to either backend. Mistral detects the language
+        # itself; Deepgram uses its default, English. The label is fixed, as in
+        # the live pipeline, and is not a detected language.
         left_lang = "en"
         right_lang = "en"
 
-        left_segments = transcribe_channel_chunked(left_path, "agent", left_lang)
-        right_segments = transcribe_channel_chunked(right_path, "customer", right_lang)
+        # Transcribe both channels via the failover orchestrator. A backend
+        # failure on either channel moves the whole request to the next backend,
+        # keeping a single consistent backend.
+        def _attempt_stereo(b):
+            left = transcribe_channel_chunked(left_path, "agent", left_lang, b)
+            right = transcribe_channel_chunked(right_path, "customer", right_lang, b)
+            return left, right
+
+        (left_segments, right_segments), used_backend, failures = run_with_failover(
+            _attempt_stereo, label="STEREO"
+        )
 
         # Merge and sort by midpoint
         all_segments = left_segments + right_segments
@@ -371,14 +498,19 @@ def transcribe_stereo(input_path):
         # Consolidate using midpoint sorting
         conversation = consolidate_segments(all_segments)
 
-        logging.info(f"[STEREO] Returned {len(conversation)} turns")
+        logging.info(
+            f"[STEREO] Returned {len(conversation)} turns via {used_backend} "
+            f"(after {len(failures)} failover{'s' if len(failures) != 1 else ''})"
+        )
 
         return {
             "conversation": conversation,
             "total_turns": len(conversation),
             "agent_language": left_lang,
             "customer_language": right_lang,
-            "model": DEEPGRAM_MODEL,
+            "backend": used_backend,
+            "model": model_name_for(used_backend),
+            "failures": failures,
             "audio_duration_seconds": total_duration,
             "chunking_used": total_duration > MAX_DIRECT_DURATION,
         }

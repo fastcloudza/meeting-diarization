@@ -2,7 +2,8 @@
 
 Turns one recording of a meeting into a conversation with two roles, an agent and
 a customer, turn by turn, in the order the words were said. Both speech steps run
-on [Deepgram](https://deepgram.com) with your own key.
+on [Mistral](https://mistral.ai) by default, with [Deepgram](https://deepgram.com)
+as the backup, using your own keys.
 
 ## Why
 
@@ -18,10 +19,13 @@ when, put the first speaker on one channel and everyone else on the other, and f
 there the meeting goes through exactly the same transcription path as a call.
 
 The code in this repository is taken from Wappari's working meeting pipeline. I
-have not redesigned it. I removed what cannot be public (addresses, keys, the
-platform's own fields and the step that hands the result to the rest of Wappari)
-and made both speech steps use Deepgram. Where the live pipeline carries on quietly
-after a failure, this version stops with a clear error instead.
+have not redesigned it. Mistral goes first and Deepgram takes over when Mistral
+fails, in the same order and on the same conditions as on the platform. I removed
+what cannot be public (addresses, keys, the platform's own fields, the step that
+hands the result to the rest of Wappari, and the other speech services the
+platform can fall back to). Where the live pipeline carries on quietly after a
+failure, this version stops with a clear error instead, and when the backup takes
+over it says so.
 
 Arno Hart · [LinkedIn](https://www.linkedin.com/in/arnohart/)
 
@@ -31,88 +35,126 @@ On 13 October 2026 I ran it on a real meeting recording, 4 minutes 29 seconds lo
 8 kHz mono. Neither the recording nor anything produced from it is in this
 repository.
 
-**As built, it worked first time.** Using `diarize=true` and `nova-2`, Deepgram
-found 2 speakers in 26 stretches of speech. The method returned 26 turns,
-alternating agent and customer, 13 each. Every turn came back punctuated:
-Deepgram put `punctuated_word` on every word, even though only `punctuate=true`
-is asked for. The whole run took 13.3 seconds:
+I ran it three ways, one straight after the other:
 
-| Step | Seconds |
-|---|---|
-| Downmix to 8 kHz mono | 0.7 |
-| Find the speakers (Deepgram) | 4.3 |
-| Build the two sided file | under 0.1 |
-| Split the two sides | 0.2 |
-| Transcribe the agent side (Deepgram) | 4.3 |
-| Transcribe the customer side (Deepgram) | 3.8 |
+1. **Mistral only.** Only the Mistral key was set.
+2. **Deepgram only.** Only the Deepgram key was set. The method reported that
+   Mistral was not configured for both steps and that Deepgram was used instead.
+3. **Mistral made to fail.** Both keys were set, but the Mistral key was replaced
+   by an invalid one. Mistral refused both steps (HTTP 401), Deepgram took over
+   both, and the method reported both fallbacks. The turns were identical to the
+   Deepgram only run.
 
-**Then with the option Deepgram documents today.** Straight after that, I ran the
-same recording through the same code again, but with the speaker pass sending
-`diarize_model=latest` in place of the deprecated `diarize=true`. Nothing else
-changed.
+All three runs finished. Nothing failed that was not meant to.
 
-| | `diarize=true`, as built | `diarize_model=latest` |
+| | Mistral | Deepgram |
 |---|---|---|
-| Speakers found | 2 | 3; the third speaks for 0.6 seconds in all |
-| Stretches of speech | 26 | 39 |
-| First speaker | 0.4 to 4.9 seconds | the same stretch |
-| Seconds on the agent side / customer side | 140.2 / 111.2 | 144.1 / 102.3 |
-| Turns | 26 (13 agent, 13 customer) | 25 (13 agent, 12 customer) |
-| Words on the agent side / customer side | 383 / 332 | 401 / 310 |
+| Model | `voxtral-mini-latest` | `nova-2` |
+| Speakers found | 3; the third speaks for 2.6 seconds in all | 2 |
+| Stretches of speech | 105 | 26 |
+| First speaker | from 0.6 seconds | from 0.4 seconds; the same person |
+| Seconds on the agent side / customer side | 125.7 / 97.1 | 140.2 / 111.2 |
+| Turns | 24 (12 agent, 12 customer) | 26 (13 agent, 13 customer) |
+| Words on the agent side / customer side | 360 / 330 | 383 / 332 |
 | Punctuation | on every turn | on every turn |
-| Finding the speakers | 4.3 seconds | 5.2 seconds |
-| Whole run | 13.3 seconds | 13.8 seconds |
 
-The two runs put speech on the same side 96% of the time (237 of the 246 seconds
-both of them assigned). The differences are in three places:
+The two vendors put speech on the same side 99% of the time (219 of the 222
+seconds both of them assigned). Their turns line up one for one for the first 24,
+with start times within a second of each other. The difference is at the very end:
+Deepgram splits the last eight seconds into three short turns (customer, agent,
+customer), and Mistral keeps them as one customer turn. Mistral's third speaker
+lands on the customer side, as everyone after the first speaker does. Mistral's
+stretches of speech are shorter and fit the words more tightly, which is why it
+puts fewer seconds on each side. Nobody has yet listened through the recording to
+judge which vendor is closer to who really spoke.
 
-* About 20 seconds in, a short agent turn in the first run becomes part of the
-  customer's turn in the second.
-* At about 214 seconds, the second run finds a short agent turn inside what the
-  first run kept as one customer turn.
-* The first run ends with a short customer turn at about 264 seconds. The
-  second run ends on the agent.
+**Timings, in seconds:**
 
-The third speaker in the second run lands on the customer side, as everyone
-after the first speaker does. Nobody has yet listened through the recording to
-judge which run is closer to who really spoke.
+| Step | Mistral only | Deepgram only | Mistral made to fail |
+|---|---|---|---|
+| Find the speakers | 6.9 | 23.6 | 4.8 (0.8 Mistral refusing, 4.0 Deepgram) |
+| Transcribe the agent side | 4.1 | 28.6 | 3.6 after Mistral refused in 1.1 |
+| Transcribe the customer side | 3.6 | 3.8 | 4.0 |
+| Whole run | 15.0 | 57.2 | 14.0 |
 
-Nothing failed in either run.
+Deepgram was much slower in the Deepgram only run than in the run a minute
+later, on identical requests. Earlier the same day the same requests took about
+4 seconds each. That is Deepgram's response time varying, not the method.
+
+**Deepgram's newer diarization option.** Earlier the same day, on an earlier
+version of this code that used Deepgram for both steps, I compared Deepgram's
+deprecated `diarize=true`, which this code uses, against `diarize_model=latest`,
+which Deepgram documents today. The `diarize=true` run gave exactly the same turns
+as the Deepgram runs above. With `diarize_model=latest`, Deepgram found 3 speakers
+instead of 2 (the third for 0.6 seconds in all) and 39 stretches of speech instead
+of 26. The first speaker was the same. It returned 25 turns instead of 26, and the
+two runs put speech on the same side 96% of the time. The differences were in
+three places: a short agent turn about 20 seconds in became part of the customer's
+turn, a short agent turn appeared at about 214 seconds, and the run ended on the
+agent instead of a short customer turn. Finding the speakers took 5.2 seconds
+instead of 4.3.
+
+## What a run costs
+
+These figures come from each vendor's published prices on 13 October 2026, not
+from an invoice. A run sends the full length of the recording three times: once to
+find the speakers and once for each side. For this recording that is 13.4 minutes
+of audio.
+
+* **Mistral:** $0.003 per minute for Voxtral Mini Transcribe V2, which Mistral
+  names `voxtral-mini-latest`. That makes about $0.04 for one run. Mistral's own
+  usage figures in the responses add up to 13.3 minutes.
+* **Deepgram:** Deepgram's pricing page no longer lists a price for `nova-2`.
+  Its current pay as you go price for Nova-3 (monolingual) on recorded audio is
+  $0.0043 per minute, with diarization included. At that rate one run costs about
+  $0.06.
+* When Mistral is refused and Deepgram takes over, the run costs what a Deepgram
+  run costs.
 
 ## Quickstart
 
-You need Python 3.10 or later, ffmpeg and ffprobe on your PATH, and a Deepgram API
-key. Each run is billed to your Deepgram account: the recording is sent once to find
-the speakers and each side is sent once more to be transcribed.
+You need Python 3.10 or later, ffmpeg and ffprobe on your PATH, and a key for
+Mistral, Deepgram or both.
 
 ```bash
 git clone https://github.com/fastcloudza/meeting-diarization.git
 cd meeting-diarization/server
 pip install -r requirements.txt
 
-export DEEPGRAM_API_KEY=your_key_here     # Windows PowerShell: $env:DEEPGRAM_API_KEY="your_key_here"
+export MISTRAL_API_KEY=your_mistral_key     # Windows PowerShell: $env:MISTRAL_API_KEY="your_mistral_key"
+export DEEPGRAM_API_KEY=your_deepgram_key   # optional: the backup
 python diarize_meeting.py path/to/meeting.m4a --out turns.json
 ```
 
-The key is read from the environment and is never written to a file. Two optional
-settings, also from the environment: `DEEPGRAM_MODEL` (default `nova-2`) and
-`DEEPGRAM_API_URL` (default `https://api.deepgram.com/v1/listen`).
+Keys are read from the environment and are never written to a file. With only a
+Mistral key there is no backup. With only a Deepgram key, Deepgram does both steps
+and the result says that Mistral was not configured. With no key at all the run
+stops before it starts.
 
-If any step fails, the run stops with exit status 1 and a message on stderr saying
-which step and why. It never returns a partial or guessed result.
+Optional settings, also from the environment: `MISTRAL_MODEL` (default
+`voxtral-mini-latest`), `MISTRAL_API_URL`, `DEEPGRAM_MODEL` (default `nova-2`) and
+`DEEPGRAM_API_URL`.
+
+If a step fails on every vendor it has a key for, the run stops with exit status 1
+and a message on stderr naming each vendor and why it failed. It never returns a
+partial or guessed result.
 
 ## How it works
 
 1. Take one recording of a meeting, in any format ffmpeg can read.
 2. Find who speaks when. The recording is downmixed to 8 kHz mono and sent to
-   Deepgram with diarization on. Only the speaker labels and word times are kept;
-   the text from this pass is thrown away.
+   Mistral with diarization on. If Mistral fails for any reason (no key, an error
+   status, a network failure, a reply in the wrong shape, or no speakers found),
+   the same file goes to Deepgram. Only the speaker labels and times are kept; the
+   text from this pass is thrown away.
 3. Build a two sided file. A new stereo file is written with the first person to
    speak on the left channel and everyone else on the right. Each channel is silent
    while the other side talks, and the timing is kept exactly.
 4. Transcribe each side. The two channels are split apart again and each one is
-   sent to Deepgram on its own. Long audio is cut into nine minute chunks with five
-   seconds of overlap, and the overlap is removed again afterwards.
+   sent to Mistral on its own. If Mistral fails on either side, both sides are
+   transcribed again by Deepgram, so the two sides always come from the same
+   vendor. Long audio is cut into nine minute chunks with five seconds of overlap,
+   and the overlap is removed again afterwards.
 5. Return the turns in order. Both sides are merged by time and consecutive pieces
    from the same side are joined into one turn. The left side is the agent and the
    right side is the customer.
@@ -121,7 +163,9 @@ The first speaker is the agent because the person recording opens the meeting.
 
 ## Output
 
-The values below are invented to show the shape.
+The values below are invented to show the shape. This one shows Mistral failing
+and Deepgram taking over; when Mistral works, `fell_back` is `false` and
+`failures` is empty.
 
 ```json
 {
@@ -130,30 +174,60 @@ The values below are invented to show the shape.
     { "speaker": "customer", "text": "Happy to. Where do you want to start?", "start": 2.5, "end": 4.3, "language": "en" }
   ],
   "total_turns": 2,
-  "model": "nova-2",
+  "speaker_pass": {
+    "backend": "deepgram",
+    "model": "nova-2",
+    "fell_back": true,
+    "failures": { "mistral": "Mistral diarization returned HTTP 401: {\"detail\":\"Invalid API Key\"}" }
+  },
+  "transcription": {
+    "backend": "deepgram",
+    "model": "nova-2",
+    "fell_back": true,
+    "failures": { "mistral": "Mistral transcription returned HTTP 401: {\"detail\":\"Invalid API Key\"}" }
+  },
   "audio_duration_seconds": 4.8,
   "chunking_used": false
 }
 ```
 
-`start` and `end` are seconds from the start of the recording.
+Each fallback is also printed as a warning on stderr. `start` and `end` are seconds
+from the start of the recording. The `language` field is a fixed label, as on the
+platform, not a detected language.
 
-## Checked against Deepgram's documentation
+## Checked against the documentation
 
-On 12 October 2026 I checked every Deepgram request against Deepgram's
+On 12 and 13 October 2026 I checked every request against each vendor's
 documentation.
+
+**Mistral**
+
+* Authentication with `Authorization: Bearer <key>`, and the audio sent as the
+  multipart `file` field, match the documentation.
+* `diarize` and `timestamp_granularities` are documented and not marked as
+  deprecated. Timestamps cannot be combined with `language`; this method sends
+  no language and lets Mistral detect it.
+* Mistral names `voxtral-mini-latest` as Voxtral Mini Transcribe V2. The older
+  `voxtral-mini-2507` was deprecated on 27 February 2026 and retired on 31 May
+  2026; this method does not use it.
+* The documentation does not list the fields of a segment. The real run returned
+  `text`, `start`, `end`, `speaker_id` and `type` on every segment, with
+  `speaker_id` empty when diarization is off.
+* Mistral documents recordings of up to three hours in one request, and no limit
+  on file size or processing time.
+
+**Deepgram**
 
 * Authentication with `Authorization: Token <key>`, and the raw audio as the
   request body with `Content-Type: audio/wav`, match the documentation.
 * The speaker pass uses `diarize=true`. Deepgram now marks that parameter as
   deprecated in favour of `diarize_model`. It still works and uses their first
   diarization model. I have left it as built. See the comparison above.
-* `nova-2` is still listed and not marked as deprecated. Deepgram has newer models.
+* `nova-2` is still listed as a model and is not marked as deprecated, though its
+  price is no longer on the pricing page. Deepgram has newer models.
 * No `language` is sent, so Deepgram uses its default, English.
 * Deepgram's documentation ties the `punctuated_word` field to smart formatting,
-  while this method asks for `punctuate`. The code uses `punctuated_word` when it
-  is there and the plain word when it is not. In the real run it was on every
-  word.
+  while this method asks for `punctuate`. In the real runs it was on every word.
 * Deepgram returns an error for a request that takes longer than ten minutes to
   process. The speaker pass sends the whole recording in one request.
 
@@ -164,13 +238,14 @@ documentation.
   first speaker ends up on the customer side.
 * If someone other than the person recording speaks first, the roles come out the
   wrong way round.
-* The roles are only as good as Deepgram's diarization. If it merges two people or
-  splits one person in two, the two sided file inherits that.
+* The roles are only as good as the diarization. If it merges two people or splits
+  one person in two, the two sided file inherits that.
 * The recording is reduced to 8 kHz mono before diarization, the same as a phone
   line. That can cost accuracy on a good microphone.
-* Both sides are transcribed in English unless the model is changed.
+* Deepgram transcribes in English unless the model is changed. Mistral detects the
+  language itself.
 * Very long recordings are limited to twenty transcription chunks (about three
-  hours) and by Deepgram's processing time limit on the single speaker pass.
+  hours) and by each vendor's limit on the single speaker pass.
 
 ## Consent
 
@@ -185,7 +260,7 @@ server/
   transcribe_sides.py   steps 4 and 5: split the sides, transcribe each, merge in order
   diarize_meeting.py    runs the whole method on one file from the command line
   errors.py             the one error type every step raises
-  tests/                tests with invented data; none of them call Deepgram
+  tests/                tests with invented data; none of them call Mistral or Deepgram
 ```
 
 ## Tests
@@ -195,10 +270,14 @@ cd server
 python -m unittest discover -s tests -v
 ```
 
-No key and no network are needed. The end to end test builds a recording from two
-invented voices (two tones), runs the real ffmpeg steps and fakes only Deepgram. It
-needs ffmpeg and ffprobe and is skipped without them. The automated test run on
-every change installs them, so it always runs there.
+No keys and no network are needed; every test sets its own invented keys. The
+tests cover the order (Mistral first), each fallback to Deepgram, a reader with
+only one of the two keys, and both stop conditions (no key at all, and every
+vendor failing). Two end to end tests build a recording from two invented voices
+(two tones), run the real ffmpeg steps and fake only the vendors: one where
+Mistral works, and one where Mistral refuses and Deepgram takes over. They need
+ffmpeg and ffprobe and are skipped without them. The automated test run on every
+change installs them, so they always run there.
 
 ## Licence
 

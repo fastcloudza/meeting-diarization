@@ -1,10 +1,11 @@
 """
 Meeting preparation: one recording of a meeting becomes a two sided file.
 
-The recording is downmixed to 8 kHz mono, Deepgram finds who speaks when, and
-the audio is rebuilt as stereo: the first person heard goes on the left
-channel, everyone else on the right. That file then goes through the same per
-side transcription as a two channel phone call (see transcribe_sides.py).
+The recording is downmixed to 8 kHz mono, Mistral finds who speaks when (with
+Deepgram as the backup), and the audio is rebuilt as stereo: the first person
+heard goes on the left channel, everyone else on the right. That file then goes
+through the same per side transcription as a two channel phone call (see
+transcribe_sides.py).
 """
 import os
 import wave
@@ -16,14 +17,70 @@ import requests
 
 from errors import MeetingDiarizationError
 
-# Deepgram settings come from the environment. The key is never written in a file.
+# Settings come from the environment. Keys are never written in a file.
+MISTRAL_API_URL = os.environ.get("MISTRAL_API_URL", "https://api.mistral.ai/v1/audio/transcriptions")
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "voxtral-mini-latest")
+
+# Deepgram is the backup diariser, used only when Mistral fails.
 DEEPGRAM_API_URL = os.environ.get("DEEPGRAM_API_URL", "https://api.deepgram.com/v1/listen")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "")
 DEEPGRAM_MODEL = os.environ.get("DEEPGRAM_MODEL", "nova-2")
 
 
+def mistral_diarise(mono_wav_path):
+    """Call Mistral Voxtral with diarize=true. Return a list of segments.
+    Each segment: {speaker_id (str, e.g. "speaker_1"), start (float), end (float), text (str), ...}
+    Only the segment timestamps and speaker labels are used to build the two sided file;
+    each side is transcribed again afterwards.
+    Raises MeetingDiarizationError on any failure.
+    """
+    if not MISTRAL_API_URL or not MISTRAL_API_KEY:
+        raise MeetingDiarizationError(
+            "Mistral is not configured: set MISTRAL_API_KEY in the environment"
+        )
+    try:
+        with open(mono_wav_path, "rb") as f:
+            resp = requests.post(
+                MISTRAL_API_URL,
+                headers={"Authorization": f"Bearer {MISTRAL_API_KEY}"},
+                files={"file": f},
+                data={
+                    "model": MISTRAL_MODEL,
+                    "diarize": "true",
+                    # requests serialises lists as repeated form keys, which Mistral accepts
+                    "timestamp_granularities": ["segment"],
+                },
+                timeout=300,
+            )
+    except requests.exceptions.RequestException as e:
+        raise MeetingDiarizationError(f"Mistral diarization request failed: {e}") from e
+    if resp.status_code != 200:
+        raise MeetingDiarizationError(
+            f"Mistral diarization returned HTTP {resp.status_code}: {resp.text[:500]}"
+        )
+    try:
+        result = resp.json()
+        segments = result.get("segments") or []
+    except (ValueError, AttributeError) as e:
+        raise MeetingDiarizationError(
+            f"Mistral diarization response did not have the expected shape: {e!r}"
+        ) from e
+    if not segments:
+        raise MeetingDiarizationError("Mistral diarization returned no segments")
+    if any(not s.get("speaker_id") for s in segments):
+        raise MeetingDiarizationError(
+            "Mistral returned segments without a speaker label, so diarization was not applied"
+        )
+    speakers = {s.get("speaker_id") for s in segments}
+    logging.info(f"[DIARISE] Mistral returned {len(segments)} segments, {len(speakers)} speakers")
+    return segments
+
+
 def deepgram_diarise(mono_wav_path):
-    """Call Deepgram with diarize=true. Return a list of segments.
+    """Backup diariser: call Deepgram with diarize=true. Return a list of segments.
+    Same return contract as mistral_diarise, so build_synthetic_stereo and everything
+    downstream consume it identically.
     Each segment is {speaker_id (str, e.g. "speaker_1"), start (float), end (float)}.
     Deepgram's transcript text is discarded here; only word level timestamps and
     speaker labels are used. Deepgram authenticates with `Authorization: Token <key>`
@@ -63,7 +120,8 @@ def deepgram_diarise(mono_wav_path):
         ) from e
 
     # Group consecutive same speaker words into segments. speaker is a 0 based int from
-    # Deepgram; +1 gives speaker_1 / speaker_2 naming.
+    # Deepgram; +1 maps it onto Mistral's speaker_1 / speaker_2 naming so downstream is blind
+    # to the provider.
     segments = []
     current = None
     for w in words:
@@ -140,10 +198,41 @@ def build_synthetic_stereo(mono_wav_path, segments, output_path):
     logging.info(f"[DIARISE] Synthetic stereo: L={first_speaker} ({l_segs} segs), R=others ({r_segs} segs)")
 
 
+def find_speakers(mono_wav_path):
+    """Mistral first; Deepgram only when Mistral fails and Deepgram has a key.
+    Returns (segments, info). info says which backend was used and why any
+    backend before it failed, so a fallback is never silent.
+    Raises MeetingDiarizationError when no backend produced segments.
+    """
+    failures = {}
+    try:
+        segments = mistral_diarise(mono_wav_path)
+        return segments, {"backend": "mistral", "model": MISTRAL_MODEL, "failures": failures}
+    except MeetingDiarizationError as e:
+        failures["mistral"] = str(e)
+
+    if not DEEPGRAM_API_URL or not DEEPGRAM_API_KEY:
+        raise MeetingDiarizationError(
+            f"Finding the speakers failed: mistral: {failures['mistral']}; "
+            "deepgram: not configured (set DEEPGRAM_API_KEY to use it as the backup)"
+        )
+    # Mistral failed: any non 200, exception, timeout, malformed JSON, missing key or empty result.
+    logging.warning(f"[DIARISE] Mistral failed ({failures['mistral']}), trying Deepgram")
+    try:
+        segments = deepgram_diarise(mono_wav_path)
+    except MeetingDiarizationError as e:
+        failures["deepgram"] = str(e)
+        raise MeetingDiarizationError(
+            f"Finding the speakers failed: mistral: {failures['mistral']}; "
+            f"deepgram: {failures['deepgram']}"
+        ) from e
+    return segments, {"backend": "deepgram", "model": DEEPGRAM_MODEL, "failures": failures}
+
+
 def prepare_meeting_recording(recording_file, work_dir):
     """Diarise a meeting recording and rebuild it as two sided stereo.
-    Returns the path to the new stereo WAV in work_dir, ready for
-    transcribe_sides.transcribe_stereo.
+    Returns (path, info): the new stereo WAV in work_dir, ready for
+    transcribe_sides.transcribe_stereo, and which backend found the speakers.
     Raises MeetingDiarizationError if any step fails.
     """
     logging.info(f"[DIARISE] Meeting recording: {recording_file}")
@@ -167,9 +256,9 @@ def prepare_meeting_recording(recording_file, work_dir):
         if result.returncode != 0:
             raise MeetingDiarizationError(f"ffmpeg downmix failed: {result.stderr[-500:]}")
 
-        segments = deepgram_diarise(mono_path)
+        segments, info = find_speakers(mono_path)
         build_synthetic_stereo(mono_path, segments, synth_path)
-        return synth_path
+        return synth_path, info
     finally:
         if os.path.exists(mono_path):
             try:
