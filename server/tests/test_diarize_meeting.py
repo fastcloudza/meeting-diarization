@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Arno Hart. All rights reserved.
-# Published for viewing only. No licence is granted. See LICENSE.
 """Tests for the whole method, end to end. Deepgram is faked; nothing leaves the machine.
 
 The end to end test needs ffmpeg and ffprobe on the PATH and is skipped without

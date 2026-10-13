@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Arno Hart. All rights reserved.
-# Published for viewing only. No licence is granted. See LICENSE.
 """
 Per side transcription of a two sided recording.
 

@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Arno Hart. All rights reserved.
-# Published for viewing only. No licence is granted. See LICENSE.
 """
 One recording of a meeting in, agent and customer turns out.
 

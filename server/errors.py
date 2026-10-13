@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Arno Hart. All rights reserved.
-# Published for viewing only. No licence is granted. See LICENSE.
 """The one error type the method raises when a step cannot complete."""
 
 

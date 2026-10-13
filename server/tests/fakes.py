@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Arno Hart. All rights reserved.
-# Published for viewing only. No licence is granted. See LICENSE.
 """Made up test data in the shape Deepgram returns. Nothing here is a real recording."""
 import json
 import wave

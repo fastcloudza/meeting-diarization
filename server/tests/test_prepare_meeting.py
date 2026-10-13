@@ -1,5 +1,3 @@
-# Copyright (c) 2026 Arno Hart. All rights reserved.
-# Published for viewing only. No licence is granted. See LICENSE.
 """Tests for prepare_meeting.py. Deepgram and ffmpeg are faked; nothing leaves the machine."""
 import os
 import shutil
