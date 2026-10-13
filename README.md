@@ -29,6 +29,62 @@ over it says so.
 
 Arno Hart · [LinkedIn](https://www.linkedin.com/in/arnohart/)
 
+## The recorder
+
+The method starts from one recording of a meeting, so this repository also holds
+the app that makes one. It is the meeting recorder from the Android app I built at
+Wappari, lifted out and kept as it was built: a service that keeps recording with
+the screen off, and the writer that produces the file. I added one small screen so
+you can run it, with a Start button, a Stop button, and a Share button for getting
+the saved file off the phone.
+
+The service captures stereo from the phone's microphones at 16 kHz and the writer
+saves a 16 bit stereo WAV at 8 kHz, with the two channels exactly as the phone gave
+them. Nothing on the phone works out who spoke. That is left to the server side, on
+purpose. The file is saved in the app's own folder, so the app needs no storage
+permission, and it never leaves the phone unless you press Share.
+
+I removed everything that was not the recorder: the upload and the key that went
+with it, the login, the business and customer details, the contact picker, calling,
+the wake word, and every server address and name. Where the recorder in the app
+carried on quietly after a failure, this one says so on the screen. The places are
+below. The screen shows the real state of the recording at every moment, including
+after the phone is rotated.
+
+**Where it behaves differently from the one in the app**
+
+1. If the microphone cannot be opened (the phone refuses stereo, the permission is
+   missing, another app has the microphone), the app now says so and removes its
+   notification. Before, it logged the reason, kept the notification, and showed
+   nothing.
+2. If the phone has no storage to save to, or the file cannot be created, it says
+   so. Before, the service crashed.
+3. If writing fails part way, for example because the phone is full, it keeps what
+   it has and says so. Before, the error was not caught and the app crashed.
+4. If the microphone stops delivering audio, it stops and says so. Before, it spun
+   in a loop forever.
+5. If the file cannot be finished, it says so. Before, that was only logged.
+6. Pressing Stop when nothing is recording no longer leaves a notification and an
+   idle service behind.
+7. A recording that is stopped before any audio arrives is reported and removed,
+   instead of leaving a file with only a header.
+8. A recording that comes out silent, with one dead channel, or with dropped
+   windows says so on the screen. Before, the first two were only logged and the
+   dropped windows were counted and never reported.
+9. If the app is killed while recording, the file is left with its sizes unset. On
+   the next start the app finishes the header, so the file plays, and says the
+   recording was cut short.
+10. The screen says Recording only once audio is really arriving. It says so if the
+    recorder has not started after five seconds, and if notifications are off.
+
+The recorder in the app also sent the file to a server and kept a record of the
+customer chosen. None of that is here.
+
+**Android versions.** It supports Android 7.0 (API 24) and later, and is built
+against Android 15 (API 35). The versions matter in two places. From Android 13 the
+app also asks to show notifications, and recording works without that permission.
+From Android 14 the foreground service has to declare the microphone, which it does.
+
 ## What happened on a real recording
 
 On 13 October 2026 I ran it on a real meeting recording, 4 minutes 29 seconds long,
@@ -138,6 +194,34 @@ Optional settings, also from the environment: `MISTRAL_MODEL` (default
 If a step fails on every vendor it has a key for, the run stops with exit status 1
 and a message on stderr naming each vendor and why it failed. It never returns a
 partial or guessed result.
+
+## Try the recorder
+
+You need a phone or an emulator, a JDK 17 or later, and the Android SDK (Android
+Studio brings both). From the folder `android`:
+
+```bash
+cd android
+./gradlew assembleDebug          # Windows PowerShell: .\gradlew.bat assembleDebug
+adb install app/build/outputs/apk/debug/app-debug.apk
+```
+
+Open Meeting Recorder, press Start and allow the microphone, and talk. The recorder
+is built to keep going with the phone locked or the screen off. Press Stop, then Share the saved
+file to wherever you like, or take it off with a cable:
+
+```bash
+adb pull /sdcard/Android/data/com.arnohart.meetingdiarization/files/recordings/ .
+```
+
+The file is a stereo WAV and goes straight into the server side:
+
+```bash
+python server/diarize_meeting.py recordings/the_file.wav --out turns.json
+```
+
+[android/try_it_script.md](android/try_it_script.md) is a made up two person
+meeting at an invented bakery that you can read aloud to try it.
 
 ## How it works
 
@@ -255,6 +339,16 @@ where you are.
 ## Layout
 
 ```text
+android/
+  app/src/main/         the recorder app
+    DiarisedRecordingService.kt   the service that records, with the screen off
+    StereoWavWriter.kt            the writer that produces the audio file
+    RecorderState.kt              what the recorder is doing, shared with the screen
+    RecordingFiles.kt             where files live, and mending one that was cut short
+    MainActivity.kt               the one screen: start, stop, share
+  app/src/test/         tests of the writer and the file handling
+  app/src/androidTest/  a test of the writer that runs on a phone or emulator
+  try_it_script.md      a made up meeting to read aloud
 server/
   prepare_meeting.py    steps 2 and 3: downmix, find the speakers, build the two sided file
   transcribe_sides.py   steps 4 and 5: split the sides, transcribe each, merge in order
@@ -278,6 +372,21 @@ vendor failing). Two end to end tests build a recording from two invented voices
 Mistral works, and one where Mistral refuses and Deepgram takes over. They need
 ffmpeg and ffprobe and are skipped without them. The automated test run on every
 change installs them, so they always run there.
+
+The app side has its own tests, which need no phone:
+
+```bash
+cd android
+./gradlew testDebugUnitTest
+```
+
+They cover the writer (the header, the sizes, the 8 kHz stereo format, two windows
+in a row), mending the header of a recording that was cut short, and the messages
+shown about a finished recording. A further test of the writer runs on a phone or
+emulator with `./gradlew connectedDebugAndroidTest`. The microphone and the service
+are not covered by an automated test, because they need a real microphone. The
+automated run on every change builds the app and runs the unit tests next to the
+server tests.
 
 ## Licence
 
