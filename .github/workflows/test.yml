@@ -1,0 +1,34 @@
+# Copyright (c) 2026 Arno Hart. All rights reserved.
+# Published for viewing only. No licence is granted. See LICENSE.
+#
+# Build and test on every change. No Deepgram key is used or needed here.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install requirements
+        run: pip install -r requirements.txt
+      - name: Build
+        run: python -m compileall -q .
+      - name: Test
+        env:
+          DEEPGRAM_API_KEY: ""
+        run: python -m unittest discover -s tests -v

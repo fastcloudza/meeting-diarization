@@ -1,0 +1,24 @@
+# No real recordings or transcripts ever go into this repository.
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.opus
+*.flac
+*.webm
+*.mp4
+*.3gp
+*.amr
+recordings/
+output/
+turns*.json
+
+# Keys stay in the environment.
+.env
+.env.*
+
+__pycache__/
+*.pyc
+.venv/
+venv/
