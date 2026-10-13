@@ -22,3 +22,17 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# The app side: build output, local settings, and anything that signs or installs.
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.apk
+*.aab
+*.keystore
+*.jks
+*.hprof
+android/.kotlin/
