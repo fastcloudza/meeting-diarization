@@ -1,94 +1,136 @@
 # Meeting Diarization
 
-A phone app that records a meeting, and a server side that turns the recording into
-a conversation: who said what, in order, as an agent and a customer.
+Turns one recording of a meeting into a conversation between an agent and a
+customer, turn by turn, in the order the words were said. It uses
+[Mistral](https://mistral.ai), with [Deepgram](https://deepgram.com) as the backup,
+on your own keys.
 
-## The problem
-
-A meeting recorded on a phone is one mixed sound. A phone has more than one
-microphone, but each of them hears everyone in the room, so the phone cannot split
-the recording by speaker. On a phone call it is different. The two sides arrive
-separately, so each side is a speaker for free. In a room that is impossible on the
-phone side.
-
-So the separation has to happen afterwards, on a server, with a diarization service
-that works out who spoke when. Until that is done the recording cannot go anywhere
-as a conversation between an agent and a customer.
-
-## What I built
+## Why
 
 I am the founder of [Wappari](https://wappari.com/), where every conversation a
-business has with a customer is brought down to the same shape: text from the
-customer or from the agent, turn by turn. This is how I get a meeting into that
-shape. The code is taken from Wappari's working meeting pipeline, with what cannot
-be public removed.
+business has with a customer is brought down to the same shape: text attributed to
+the customer or to the agent, turn by turn. Phone calls arrive in that shape almost
+for free, because the agent is on one channel of the recording and the customer on
+the other. A meeting does not. However many microphones a phone has, each one
+hears everyone in the room, so no channel belongs to one person. The split by
+speaker cannot happen on the phone.
 
-* **The recorder** (`android/`) is an Android app with one screen. It records the
-  meeting, is built to keep going with the screen off, and saves a stereo WAV on the phone.
-  It does not try to split the speakers. You Share the file off the phone when you
-  are done.
-* **The server side** (`server/`) sends the file to a diarization service and works
-  out who spoke when. The first speaker is the agent, because the person recording
-  opens the meeting. Everyone else is the customer. It then transcribes each side
-  on its own and returns the meeting as ordered agent and customer turns, ready to
-  feed into a conversation platform.
+So I built a way to give a meeting the same shape as a phone call. The result is
+ordered agent and customer turns, ready to go into a conversation platform the
+same way a call does. Find who speaks when, put the first speaker on one side and
+everyone else on the other, and from there the meeting goes through exactly the
+same transcription path as a call.
 
-It uses [Mistral](https://mistral.ai) first and [Deepgram](https://deepgram.com) as
-the backup, with your own keys.
+The code is taken from Wappari's working meeting pipeline, with everything private
+removed. This repository also holds the Android recorder the method starts from.
 
-## How to run it
+Arno Hart · [LinkedIn](https://www.linkedin.com/in/arnohart/)
 
-The app needs a JDK 17 or later and the Android SDK, and runs on Android 7.0 and
-later.
+## Does it work
+
+On 14 October 2026 I ran the whole path: the recorder on a phone, then the server
+side on the file it saved. The meeting was a made up conversation at an invented
+bakery ([android/try_it_script.md](android/try_it_script.md)), played as synthetic
+voices from a laptop speaker. It took about 15 seconds and returned 13 of the 16
+scripted turns. The lost ones were short customer replies, one merged into the
+agent's turn and one missing.
+
+What went wrong: a few words came out wrong ("Bree Street is thirty rand" became
+"3 street is 30 rent"). Synthetic voices from one speaker say nothing about real
+people talking over each other in a noisy room.
+
+If Mistral fails, Deepgram takes over automatically. I tested that by giving it a
+bad Mistral key: Deepgram took over and the result said so.
+
+A run costs about 4 cents on Mistral for a 4.5 minute meeting.
+
+The full results, the vendor comparison and the documentation checks are in
+[docs/notes.md](docs/notes.md).
+
+## Quickstart
+
+You need Python 3.10 or later, ffmpeg (on Windows: `winget install ffmpeg`) and a
+key for Mistral, Deepgram or both.
+
+```bash
+git clone https://github.com/fastcloudza/meeting-diarization.git
+cd meeting-diarization/server
+pip install -r requirements.txt
+
+export MISTRAL_API_KEY=your_mistral_key     # Windows PowerShell: $env:MISTRAL_API_KEY="your_mistral_key"
+export DEEPGRAM_API_KEY=your_deepgram_key   # optional: the backup
+python diarize_meeting.py path/to/meeting.m4a --out turns.json
+```
+
+Keys are read from the environment and never written to a file. If every vendor
+you have a key for fails, the run stops with a clear error and never returns a
+partial result.
+
+## Try the recorder
+
+You need a phone or an emulator, a JDK 17 or later, and the Android SDK (Android
+Studio brings both).
 
 ```bash
 cd android
-./gradlew assembleDebug          # gradlew.bat on Windows
+./gradlew assembleDebug          # Windows PowerShell: .\gradlew.bat assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Open Meeting Recorder, press Start, talk, press Stop, and Share the file.
-[android/try_it_script.md](android/try_it_script.md) is a made up meeting you can
-read aloud.
-
-The server side needs Python 3.10 or later, ffmpeg and ffprobe, and a Mistral or
-Deepgram key:
+Open Meeting Recorder, press Start, and talk. Press Stop, then Share the saved file,
+and run it through the server side:
 
 ```bash
-cd server
-pip install -r requirements.txt
-export MISTRAL_API_KEY=your_key      # or DEEPGRAM_API_KEY
-python diarize_meeting.py meeting.wav --out turns.json
+python server/diarize_meeting.py the_file.wav --out turns.json
 ```
 
-`turns.json` holds the turns in order, each with its speaker, text and times.
+## How it works
 
-## Has it run
+1. Find who speaks when. The recording goes to Mistral with diarization on, or to
+   Deepgram if Mistral fails.
+2. Build a two sided file, like a phone call: the first person to speak on one
+   channel, everyone else on the other, with the timing kept exactly.
+3. Transcribe each side on its own.
+4. Merge both sides by time into turns. The first speaker is the agent, because the
+   person recording opens the meeting.
 
-Yes, once for real on a phone, a Ulefone Power Armor 19T on Android 12. I was alone,
-so the meeting was a made up conversation at an invented bakery, spoken by two
-synthetic voices played from my laptop while the app recorded. The recording came
-back as ordered turns with the agent and the customer on the right sides almost
-all the way through, and most words, numbers and names right. Two short turns were
-lost and a few words were wrong. It does not show how the method copes with real
-people in a room, which I have not yet tested. The recording is not in this
-repository.
+## Output
+
+```json
+{
+  "turns": [
+    { "speaker": "agent", "text": "Thanks for making the time today.", "start": 0.4, "end": 2.1 },
+    { "speaker": "customer", "text": "Happy to. Where do you want to start?", "start": 2.5, "end": 4.3 }
+  ]
+}
+```
+
+The full output also records which vendor did each step and whether it fell back.
 
 ## Limits
 
-* There are exactly two roles. The first person to speak is the agent and everyone
-  else is the customer.
+* There are two roles. The first person to speak is the agent and everyone else is
+  the customer, so a meeting with three or more people puts everyone after the
+  first speaker on the customer side.
 * If someone other than the person recording speaks first, the roles come out the
   wrong way round.
-* The roles are only as good as the diarization. If it merges two people or splits
-  one in two, the result inherits that.
-* Only record people who have agreed to be recorded, and follow the recording laws
-  where you are.
+* The result is only as good as the diarization. If it merges two people or splits
+  one in two, the turns inherit that.
 
-More detail is in [NOTES.md](NOTES.md).
+## Consent
+
+Only record people who have agreed to be recorded, and follow the recording laws
+where you are.
+
+## Tests
+
+```bash
+cd server && python -m unittest discover -s tests -v
+cd android && ./gradlew testDebugUnitTest
+```
+
+No keys and no network are needed.
 
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
-
-Arno Hart · [LinkedIn](https://www.linkedin.com/in/arnohart/)
