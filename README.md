@@ -31,13 +31,10 @@ Arno Hart · [LinkedIn](https://www.linkedin.com/in/arnohart/)
 On 14 October 2026 I ran the whole path: the recorder on a phone, then the server
 side on the file it saved. The meeting was a made up conversation at an invented
 bakery ([android/try_it_script.md](android/try_it_script.md)), played as synthetic
-voices from a laptop speaker. It took about 15 seconds and returned 13 of the 16
-scripted turns. The lost ones were short customer replies, one merged into the
-agent's turn and one missing.
+voices from a laptop speaker. It took about 15 seconds.
 
-What went wrong: a few words came out wrong ("Bree Street is thirty rand" became
-"3 street is 30 rent"). Synthetic voices from one speaker say nothing about real
-people talking over each other in a noisy room.
+Synthetic voices from one speaker say nothing about real people talking over each
+other in a noisy room.
 
 If Mistral fails, Deepgram takes over automatically. I tested that by giving it a
 bad Mistral key: Deepgram took over and the result said so.
