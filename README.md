@@ -36,6 +36,10 @@ voices from a laptop speaker. It took about 15 seconds.
 Synthetic voices from one speaker say nothing about real people talking over each
 other in a noisy room.
 
+A recording made by this app on the phone was also delivered into a working
+WhatsApp business number on Wappari, and the meeting appeared in that inbox as
+agent and customer turns.
+
 If Mistral fails, Deepgram takes over automatically. I tested that by giving it a
 bad Mistral key: Deepgram took over and the result said so.
 
