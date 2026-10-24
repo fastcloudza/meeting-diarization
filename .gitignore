@@ -36,3 +36,6 @@ android/captures/
 *.jks
 *.hprof
 android/.kotlin/
+
+# Local env + patch/dump files (kept on disk, never committed)
+*.diff
